@@ -3,15 +3,13 @@ Gel Image Analyzer Widget
 
 Provides molecular weight/size estimation from gel electrophoresis images.
 Works with both protein gels (kDa) and DNA gels (bp).
-Uses rectangle ROIs to define lanes, with one lane designated as the
-molecular weight ladder/standards.
+Uses LaneROI to define lanes with integrated peak markers.
 """
 
 import json
 import os
 import numpy as np
 from scipy.signal import find_peaks
-from vispy import scene
 
 from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
@@ -21,7 +19,7 @@ from qtpy.QtWidgets import (
 from qtpy.QtCore import Qt
 
 from .manager import manager
-from .rois import RectangleROI
+from .rois import RectangleROI, LaneROI
 
 
 def get_builtin_ladders_path():
@@ -42,215 +40,11 @@ def load_ladders(path=None):
         return []
 
 
-class PeakMarker:
-    """A single adjustable peak marker with line and label."""
-
-    def __init__(self, view, roi, y_local, label_text, color, is_ladder=False):
-        self.view = view
-        self.roi = roi
-        self.y_local = y_local  # Position relative to ROI top
-        self.label_text = label_text
-        self.color = color
-        self.is_ladder = is_ladder
-        self.selected = False
-
-        # Get ROI bounds
-        p1 = roi.data.get('p1', (0, 0))
-        p2 = roi.data.get('p2', (0, 0))
-        self.x_min = min(p1[0], p2[0])
-        self.x_max = max(p1[0], p2[0])
-        self.y_roi_min = min(p1[1], p2[1])
-        self.y_roi_max = max(p1[1], p2[1])
-
-        # Create line visual
-        self.line_visual = scene.visuals.Line(
-            pos=self._get_line_pos(),
-            color=color,
-            width=2,
-            parent=self.view.scene
-        )
-
-        # Create label visual (small, non-intrusive)
-        self.label_visual = scene.visuals.Text(
-            text=label_text,
-            color=color,
-            font_size=8,
-            anchor_x='left',
-            anchor_y='center',
-            parent=self.view.scene
-        )
-        self._update_label_pos()
-
-    def _get_line_pos(self):
-        """Get line position array."""
-        y_global = self.y_roi_min + self.y_local
-        return np.array([
-            [self.x_min, y_global, 0],
-            [self.x_max, y_global, 0]
-        ], dtype=np.float32)
-
-    def _update_label_pos(self):
-        """Update label position to be at right edge of line."""
-        y_global = self.y_roi_min + self.y_local
-        self.label_visual.pos = (self.x_max + 3, y_global, 0)
-
-    def get_global_y(self):
-        """Get global Y coordinate of this marker."""
-        return self.y_roi_min + self.y_local
-
-    def set_y_local(self, y_local):
-        """Set local Y position and update visuals."""
-        # Clamp to ROI bounds
-        roi_height = self.y_roi_max - self.y_roi_min
-        self.y_local = max(0, min(y_local, roi_height))
-        self.line_visual.set_data(pos=self._get_line_pos())
-        self._update_label_pos()
-
-    def set_y_global(self, y_global):
-        """Set global Y position."""
-        self.set_y_local(y_global - self.y_roi_min)
-
-    def hit_test(self, x, y, tolerance=5):
-        """Test if point (x, y) is near this marker line."""
-        y_global = self.get_global_y()
-        if self.x_min <= x <= self.x_max:
-            if abs(y - y_global) <= tolerance:
-                return True
-        return False
-
-    def set_selected(self, selected):
-        """Set selection state (changes appearance)."""
-        self.selected = selected
-        if selected:
-            self.line_visual.set_data(color='yellow', width=3)
-        else:
-            self.line_visual.set_data(color=self.color, width=2)
-
-    def remove(self):
-        """Remove visuals from scene."""
-        self.line_visual.parent = None
-        self.label_visual.parent = None
-
-
-class PeakMarkers:
-    """Manager for ephemeral peak marker visuals with drag support."""
-
-    def __init__(self, view, on_peaks_changed=None):
-        self.view = view
-        self.markers = []  # List of PeakMarker objects
-        self.dragging_marker = None
-        self.on_peaks_changed = on_peaks_changed  # Callback when peaks change
-
-    def update(self, roi_peaks_data, ladder_sizes=None, unit="kDa"):
-        """
-        Update peak markers.
-
-        Args:
-            roi_peaks_data: List of dicts with keys:
-                - 'roi': RectangleROI
-                - 'peaks': array of y-positions (in ROI-local coords)
-                - 'color': color for markers
-                - 'is_ladder': bool
-                - 'roi_idx': int
-            ladder_sizes: List of sizes for ladder labels
-            unit: Unit string (kDa, bp, etc.)
-        """
-        self.clear()
-
-        for data in roi_peaks_data:
-            roi = data['roi']
-            peaks = data['peaks']
-            color = data['color']
-            is_ladder = data.get('is_ladder', False)
-
-            for i, peak_y_local in enumerate(peaks):
-                # Create label text
-                if is_ladder and ladder_sizes is not None and i < len(ladder_sizes):
-                    label = f"{ladder_sizes[i]} {unit}"
-                else:
-                    label = ""  # Sample peaks get labels after MW calculation
-
-                marker = PeakMarker(
-                    self.view, roi, peak_y_local, label, color, is_ladder
-                )
-                self.markers.append(marker)
-
-    def update_sample_labels(self, sample_mw_data, unit="kDa"):
-        """
-        Update labels for sample lane markers after MW calculation.
-
-        Args:
-            sample_mw_data: List of (roi, mw_values) tuples
-        """
-        # Build a lookup by ROI
-        roi_mw_map = {id(roi): mws for roi, mws in sample_mw_data}
-
-        mw_idx = {}  # Track index per ROI
-        for marker in self.markers:
-            if not marker.is_ladder:
-                roi_id = id(marker.roi)
-                if roi_id in roi_mw_map:
-                    idx = mw_idx.get(roi_id, 0)
-                    mws = roi_mw_map[roi_id]
-                    if idx < len(mws):
-                        marker.label_text = f"~{mws[idx]:.1f} {unit}"
-                        marker.label_visual.text = marker.label_text
-                    mw_idx[roi_id] = idx + 1
-
-    def get_peaks_by_roi(self):
-        """Get current peak positions grouped by ROI.
-
-        Returns:
-            dict: {roi: [y_local_positions]}
-        """
-        roi_peaks = {}
-        for marker in self.markers:
-            roi = marker.roi
-            if roi not in roi_peaks:
-                roi_peaks[roi] = []
-            roi_peaks[roi].append(marker.y_local)
-        return roi_peaks
-
-    def hit_test(self, x, y):
-        """Find marker at position (x, y)."""
-        for marker in self.markers:
-            if marker.hit_test(x, y):
-                return marker
-        return None
-
-    def start_drag(self, marker):
-        """Start dragging a marker."""
-        if self.dragging_marker:
-            self.dragging_marker.set_selected(False)
-        self.dragging_marker = marker
-        marker.set_selected(True)
-
-    def drag_to(self, y):
-        """Move dragging marker to y position."""
-        if self.dragging_marker:
-            self.dragging_marker.set_y_global(y)
-
-    def end_drag(self):
-        """End dragging and trigger callback."""
-        if self.dragging_marker:
-            self.dragging_marker.set_selected(False)
-            self.dragging_marker = None
-            if self.on_peaks_changed:
-                self.on_peaks_changed()
-
-    def clear(self):
-        """Remove all peak marker visuals."""
-        for marker in self.markers:
-            marker.remove()
-        self.markers = []
-        self.dragging_marker = None
-
-
 class GelAnalyzerWidget(QWidget):
     """
     Widget for analyzing gel electrophoresis images.
 
-    Detects bands in lanes (Rectangle ROIs), uses one lane as a
+    Detects bands in lanes (LaneROI), uses one lane as a
     molecular weight ladder, and estimates MW of bands in other lanes.
     Supports both protein (kDa) and DNA (bp) gels.
     """
@@ -259,9 +53,8 @@ class GelAnalyzerWidget(QWidget):
         super().__init__()
         self.roi_manager = roi_manager
         self.ladders = load_ladders()
-        self.peak_markers = None
-        self._mouse_connected = False
-        self._cached_roi_data = []  # Store ROI data for recalculation
+        self._lane_rois = []  # Track LaneROIs we've created/converted
+        self._std_idx = None  # Index of standard lane ROI
 
         self.setWindowTitle("Gel Analyzer")
         self.resize(320, 500)
@@ -350,9 +143,14 @@ class GelAnalyzerWidget(QWidget):
         display_group = QGroupBox("Display")
         display_layout = QVBoxLayout(display_group)
 
-        self.hide_rois_check = QCheckBox("Hide lane ROIs")
-        self.hide_rois_check.stateChanged.connect(self._toggle_roi_visibility)
-        display_layout.addWidget(self.hide_rois_check)
+        self.show_labels_check = QCheckBox("Show peak labels")
+        self.show_labels_check.setChecked(True)
+        self.show_labels_check.stateChanged.connect(self._toggle_labels)
+        display_layout.addWidget(self.show_labels_check)
+
+        self.hide_borders_check = QCheckBox("Hide lane borders")
+        self.hide_borders_check.stateChanged.connect(self._toggle_borders)
+        display_layout.addWidget(self.hide_borders_check)
 
         tip_label = QLabel("Tip: Drag peak lines to adjust positions")
         tip_label.setStyleSheet("color: gray; font-size: 10px;")
@@ -383,97 +181,31 @@ class GelAnalyzerWidget(QWidget):
         """Refresh lane list when shown."""
         super().showEvent(event)
         self._refresh_lanes()
-        self._connect_mouse_events()
 
     def closeEvent(self, event):
-        """Clean up peak markers when closed."""
+        """Clean up when closed."""
         self._clear_markers()
-        self._disconnect_mouse_events()
-        # Restore ROI visibility
-        if self.hide_rois_check.isChecked():
-            self.hide_rois_check.setChecked(False)
         super().closeEvent(event)
 
-    def _connect_mouse_events(self):
-        """Connect to canvas mouse events for marker dragging."""
+    def _toggle_labels(self, state):
+        """Toggle peak label visibility."""
+        visible = state == Qt.Checked
+        for lane in self._lane_rois:
+            lane.set_marker_labels_visible(visible)
+        self._update_canvas()
+
+    def _toggle_borders(self, state):
+        """Toggle lane border visibility."""
+        show_border = state != Qt.Checked
+        for lane in self._lane_rois:
+            lane.show_border = show_border
+        self._update_canvas()
+
+    def _update_canvas(self):
+        """Update the canvas."""
         window = self.roi_manager.active_window
-        if window and not self._mouse_connected:
-            window.canvas.events.mouse_press.connect(self._on_mouse_press)
-            window.canvas.events.mouse_move.connect(self._on_mouse_move)
-            window.canvas.events.mouse_release.connect(self._on_mouse_release)
-            self._mouse_connected = True
-
-    def _disconnect_mouse_events(self):
-        """Disconnect from canvas mouse events."""
-        window = self.roi_manager.active_window
-        if window and self._mouse_connected:
-            try:
-                window.canvas.events.mouse_press.disconnect(self._on_mouse_press)
-                window.canvas.events.mouse_move.disconnect(self._on_mouse_move)
-                window.canvas.events.mouse_release.disconnect(self._on_mouse_release)
-            except (TypeError, RuntimeError):
-                pass
-            self._mouse_connected = False
-
-    def _map_event_to_image(self, event):
-        """Convert mouse event to image coordinates."""
-        window = self.roi_manager.active_window
-        if not window or not window.renderer.layers:
-            return None, None
-        tr = window.canvas.scene.node_transform(window.renderer.layers[0])
-        pos = tr.map(event.pos)
-        return pos[0], pos[1]
-
-    def _on_mouse_press(self, event):
-        """Handle mouse press for marker selection."""
-        if not self.peak_markers or event.button != 1:
-            return
-
-        x, y = self._map_event_to_image(event)
-        if x is None:
-            return
-
-        marker = self.peak_markers.hit_test(x, y)
-        if marker:
-            self.peak_markers.start_drag(marker)
-            window = self.roi_manager.active_window
-            if window:
-                window.canvas.update()
-
-    def _on_mouse_move(self, event):
-        """Handle mouse move for marker dragging."""
-        if not self.peak_markers or not self.peak_markers.dragging_marker:
-            return
-
-        x, y = self._map_event_to_image(event)
-        if y is not None:
-            self.peak_markers.drag_to(y)
-            window = self.roi_manager.active_window
-            if window:
-                window.canvas.update()
-
-    def _on_mouse_release(self, event):
-        """Handle mouse release to end dragging."""
-        if not self.peak_markers:
-            return
-
-        if self.peak_markers.dragging_marker:
-            self.peak_markers.end_drag()
-            window = self.roi_manager.active_window
-            if window:
-                window.canvas.update()
-
-    def _toggle_roi_visibility(self, state):
-        """Toggle visibility of lane ROIs."""
-        window = self.roi_manager.active_window
-        if not window:
-            return
-
-        visible = state != Qt.Checked
-        for roi in window.rois:
-            if isinstance(roi, RectangleROI):
-                roi.set_visible(visible)
-        window.canvas.update()
+        if window:
+            window.canvas.update()
 
     def _load_custom_ladder(self):
         """Load a custom ladder preset from JSON file."""
@@ -513,7 +245,7 @@ class GelAnalyzerWidget(QWidget):
             print(f"Error loading ladder file: {e}")
 
     def _refresh_lanes(self):
-        """Refresh the lane combo box with current Rectangle ROIs."""
+        """Refresh the lane combo box with current Rectangle/Lane ROIs."""
         self.lane_combo.clear()
 
         window = self.roi_manager.active_window
@@ -521,7 +253,7 @@ class GelAnalyzerWidget(QWidget):
             return
 
         for i, roi in enumerate(window.rois):
-            if isinstance(roi, RectangleROI):
+            if isinstance(roi, (RectangleROI, LaneROI)):
                 self.lane_combo.addItem(f"{i}: {roi.name}", userData=i)
 
     def _get_current_image(self):
@@ -542,16 +274,33 @@ class GelAnalyzerWidget(QWidget):
 
         return gray
 
+    def _convert_to_lane_roi(self, window, roi_idx, roi):
+        """Convert a RectangleROI to LaneROI."""
+        if isinstance(roi, LaneROI):
+            return roi  # Already a LaneROI
+
+        # Create new LaneROI with same bounds
+        lane = LaneROI(window.view, name=roi.name)
+        lane.update(roi.data['p1'], roi.data['p2'])
+
+        # Replace in window's ROI list
+        window.rois[roi_idx] = lane
+
+        # Remove old ROI visuals
+        roi.remove()
+
+        # Emit signal for ROI manager
+        window.roi_removed.emit(roi)
+        window.roi_added.emit(lane)
+
+        return lane
+
     def _detect_peaks(self):
         """Detect peaks in all lanes and update markers."""
         window = self.roi_manager.active_window
         if not window:
             self.results_text.setText("No active window")
             return
-
-        # Reconnect mouse events if window changed
-        if not self._mouse_connected:
-            self._connect_mouse_events()
 
         # Get current ladder selection
         ladder_data = self.ladder_combo.currentData()
@@ -564,8 +313,8 @@ class GelAnalyzerWidget(QWidget):
         unit = ladder_data.get('unit', 'kDa')
 
         # Get standard lane index
-        std_idx = self.lane_combo.currentData()
-        if std_idx is None:
+        self._std_idx = self.lane_combo.currentData()
+        if self._std_idx is None:
             self.results_text.setText("No standard lane selected")
             return
 
@@ -586,22 +335,26 @@ class GelAnalyzerWidget(QWidget):
         prominence = self.prominence_spin.value()
         min_distance = self.distance_spin.value()
 
-        # Get all rectangle ROIs
-        rect_rois = []
-        for i, roi in enumerate(window.rois):
-            if isinstance(roi, RectangleROI):
-                rect_rois.append((i, roi))
+        # Clear previous markers
+        self._clear_markers()
 
-        if len(rect_rois) < 1:
-            self.results_text.setText("No rectangle ROIs found")
+        # Find and convert Rectangle ROIs to Lane ROIs
+        self._lane_rois = []
+        roi_indices = []
+
+        for i, roi in enumerate(window.rois):
+            if isinstance(roi, (RectangleROI, LaneROI)):
+                lane = self._convert_to_lane_roi(window, i, roi)
+                self._lane_rois.append(lane)
+                roi_indices.append(i)
+
+        if not self._lane_rois:
+            self.results_text.setText("No rectangle/lane ROIs found")
             return
 
         # Detect peaks in each lane
-        roi_peaks_data = []
-        self._cached_roi_data = []
-
-        for idx, roi in rect_rois:
-            region = roi.get_region(gray_proc)
+        for lane, roi_idx in zip(self._lane_rois, roi_indices):
+            region = lane.get_region(gray_proc)
             if region.size == 0:
                 continue
 
@@ -615,63 +368,66 @@ class GelAnalyzerWidget(QWidget):
                 distance=min_distance
             )
 
-            is_ladder = (idx == std_idx)
-            color = 'cyan' if is_ladder else 'orange'
+            # Determine color based on whether this is the ladder
+            is_ladder = (roi_idx == self._std_idx)
+            color = LaneROI.LADDER_COLOR if is_ladder else LaneROI.SAMPLE_COLOR
 
-            roi_peaks_data.append({
-                'roi': roi,
-                'peaks': peaks,
-                'color': color,
-                'is_ladder': is_ladder,
-                'roi_idx': idx
-            })
+            # Create marker data
+            marker_data = []
+            for i, peak_y in enumerate(peaks):
+                label = ""
+                if is_ladder and i < len(ladder_sizes):
+                    label = f"{ladder_sizes[i]} {unit}"
+                marker_data.append({
+                    'y_local': float(peak_y),
+                    'label': label,
+                    'color': color
+                })
 
-            self._cached_roi_data.append({
-                'roi': roi,
-                'roi_idx': idx,
-                'is_ladder': is_ladder
-            })
+            # Set markers on lane
+            lane.set_markers(marker_data)
+            lane.locked = True
+            lane.set_markers_changed_callback(self._on_markers_adjusted)
 
-        # Create/update peak markers
-        if self.peak_markers is None:
-            self.peak_markers = PeakMarkers(
-                window.view,
-                on_peaks_changed=self._on_peaks_adjusted
-            )
-        self.peak_markers.update(roi_peaks_data, ladder_sizes, unit)
+            # Apply current display settings
+            lane.set_marker_labels_visible(self.show_labels_check.isChecked())
+            lane.show_border = not self.hide_borders_check.isChecked()
+
         window.canvas.update()
 
-        # Calculate and display results
-        self._calculate_and_display(std_idx, ladder_sizes, unit)
+        # Update ROI manager list
+        self.roi_manager.refresh_list()
 
-    def _on_peaks_adjusted(self):
-        """Called when peaks are manually adjusted."""
+        # Calculate and display results
+        self._calculate_and_display(ladder_sizes, unit)
+
+    def _on_markers_adjusted(self):
+        """Called when markers are manually adjusted."""
         ladder_data = self.ladder_combo.currentData()
         if not ladder_data:
             return
 
         ladder_sizes = ladder_data.get('sizes', ladder_data.get('weights_kda', []))
         unit = ladder_data.get('unit', 'kDa')
-        std_idx = self.lane_combo.currentData()
 
-        if std_idx is not None:
-            self._calculate_and_display(std_idx, ladder_sizes, unit)
+        self._calculate_and_display(ladder_sizes, unit)
 
-    def _calculate_and_display(self, std_idx, ladder_sizes, unit):
+    def _calculate_and_display(self, ladder_sizes, unit):
         """Calculate MW and update display."""
-        if not self.peak_markers:
+        if not self._lane_rois:
             return
 
-        # Get current peak positions from markers
-        roi_peaks = self.peak_markers.get_peaks_by_roi()
+        window = self.roi_manager.active_window
+        if not window:
+            return
 
-        # Find standard lane data
-        std_roi = None
+        # Find standard lane
+        std_lane = None
         std_peaks = None
-        for data in self._cached_roi_data:
-            if data['roi_idx'] == std_idx:
-                std_roi = data['roi']
-                std_peaks = sorted(roi_peaks.get(std_roi, []))
+        for i, roi in enumerate(window.rois):
+            if i == self._std_idx and isinstance(roi, LaneROI):
+                std_lane = roi
+                std_peaks = roi.get_marker_positions()
                 break
 
         if std_peaks is None or len(std_peaks) == 0:
@@ -692,54 +448,53 @@ class GelAnalyzerWidget(QWidget):
         log_sizes = np.log(np.array(ladder_sizes[:n_peaks]))
 
         results = []
-        results.append(f"Standard Lane (ROI {std_idx}):")
+        results.append(f"Standard Lane (ROI {self._std_idx}):")
         results.append(f"  Detected {len(std_peaks)} peaks")
         results.append(f"  Using {n_peaks} bands for calibration")
         results.append("")
 
-        # Calculate sizes for sample lanes and collect for label update
-        sample_mw_data = []
-
-        for data in self._cached_roi_data:
-            if data['is_ladder']:
+        # Calculate sizes for sample lanes
+        for i, roi in enumerate(window.rois):
+            if not isinstance(roi, LaneROI):
+                continue
+            if i == self._std_idx:
                 continue
 
-            roi = data['roi']
-            roi_idx = data['roi_idx']
-            peaks = sorted(roi_peaks.get(roi, []))
-
+            peaks = roi.get_marker_positions()
             if len(peaks) == 0:
-                results.append(f"Lane {roi_idx} ({roi.name}): No peaks detected")
+                results.append(f"Lane {i} ({roi.name}): No peaks detected")
                 continue
 
             # Interpolate in log space
             log_mw = np.interp(peaks, std_positions, log_sizes)
             mw = np.exp(log_mw)
 
-            sample_mw_data.append((roi, mw))
+            # Update marker labels
+            labels = [f"~{w:.1f} {unit}" for w in mw]
+            roi.update_marker_labels(labels)
 
-            results.append(f"Lane {roi_idx} ({roi.name}):")
+            results.append(f"Lane {i} ({roi.name}):")
             mw_strs = [f"{w:.1f}" for w in mw]
             results.append(f"  Size ({unit}): {', '.join(mw_strs)}")
 
-        # Update sample marker labels
-        self.peak_markers.update_sample_labels(sample_mw_data, unit)
-
         self.results_text.setText("\n".join(results))
-
-        window = self.roi_manager.active_window
-        if window:
-            window.canvas.update()
+        window.canvas.update()
 
     def _clear_markers(self):
-        """Clear all peak markers from the canvas."""
-        if self.peak_markers:
-            self.peak_markers.clear()
-            self.peak_markers = None
-            window = self.roi_manager.active_window
-            if window:
-                window.canvas.update()
-        self._cached_roi_data = []
+        """Clear all markers and unlock lanes."""
+        window = self.roi_manager.active_window
+        if not window:
+            return
+
+        for roi in window.rois:
+            if isinstance(roi, LaneROI):
+                roi.clear_markers()
+                roi.locked = False
+                roi.show_border = True
+
+        self._lane_rois = []
+        self._std_idx = None
+        window.canvas.update()
 
     def _copy_results(self):
         """Copy results to clipboard."""
