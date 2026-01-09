@@ -17,6 +17,7 @@ from .io import (
 from .manager import WindowManager, manager
 from .ortho import OrthoViewer
 from .roi_manager import ROIManager, get_roi_manager
+from .gel_analyzer import GelAnalyzerWidget, get_gel_analyzer, show_gel_analyzer
 from .rois import ROI, CircleROI, CoordinateROI, LineROI, RectangleROI
 from .ui import ImageWindow, Toolbar, imshow, run_app
 
@@ -44,6 +45,10 @@ __all__ = [
     "get_roi_manager",
     "WindowManager",
     "manager",
+    # gel analysis
+    "GelAnalyzerWidget",
+    "get_gel_analyzer",
+    "show_gel_analyzer",
     # viewers
     "OrthoViewer",
     # readers
