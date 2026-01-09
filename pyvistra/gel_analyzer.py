@@ -148,9 +148,10 @@ class GelAnalyzerWidget(QWidget):
         self.show_labels_check.stateChanged.connect(self._toggle_labels)
         display_layout.addWidget(self.show_labels_check)
 
-        self.hide_borders_check = QCheckBox("Hide lane borders")
-        self.hide_borders_check.stateChanged.connect(self._toggle_borders)
-        display_layout.addWidget(self.hide_borders_check)
+        self.show_borders_check = QCheckBox("Show lane borders")
+        self.show_borders_check.setChecked(True)
+        self.show_borders_check.stateChanged.connect(self._toggle_borders)
+        display_layout.addWidget(self.show_borders_check)
 
         tip_label = QLabel("Tip: Drag peak lines to adjust positions")
         tip_label.setStyleSheet("color: gray; font-size: 10px;")
@@ -190,15 +191,21 @@ class GelAnalyzerWidget(QWidget):
     def _toggle_labels(self, state):
         """Toggle peak label visibility."""
         visible = state == Qt.Checked
-        for lane in self._lane_rois:
-            lane.set_marker_labels_visible(visible)
+        window = self.roi_manager.active_window
+        if window:
+            for roi in window.rois:
+                if isinstance(roi, LaneROI):
+                    roi.set_marker_labels_visible(visible)
         self._update_canvas()
 
     def _toggle_borders(self, state):
         """Toggle lane border visibility."""
-        show_border = state != Qt.Checked
-        for lane in self._lane_rois:
-            lane.show_border = show_border
+        show_border = state == Qt.Checked
+        window = self.roi_manager.active_window
+        if window:
+            for roi in window.rois:
+                if isinstance(roi, LaneROI):
+                    roi.show_border = show_border
         self._update_canvas()
 
     def _update_canvas(self):
@@ -391,7 +398,7 @@ class GelAnalyzerWidget(QWidget):
 
             # Apply current display settings
             lane.set_marker_labels_visible(self.show_labels_check.isChecked())
-            lane.show_border = not self.hide_borders_check.isChecked()
+            lane.show_border = self.show_borders_check.isChecked()
 
         window.canvas.update()
 

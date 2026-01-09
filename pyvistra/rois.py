@@ -801,6 +801,8 @@ class LaneROI(RectangleROI):
                 if i < len(self._marker_visuals):
                     _, text_visual = self._marker_visuals[i]
                     text_visual.text = label
+                    # Also update visibility based on whether label is non-empty
+                    text_visual.visible = self.show_marker_labels and bool(label)
 
     def _get_bounds(self):
         """Get lane bounds (x_min, x_max, y_min, y_max)."""
