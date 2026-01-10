@@ -1059,6 +1059,7 @@ class FreehandROI(ROI):
     def add_point(self, point):
         """Add a point to the freehand line during drawing."""
         self.points.append(tuple(point))
+        self.data = {"points": self.points}
         self._update_line_visual()
         self._update_label_position()
 
