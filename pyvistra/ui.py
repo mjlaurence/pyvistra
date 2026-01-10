@@ -638,6 +638,9 @@ class ImageWindow(QMainWindow):
 
     def on_mouse_release(self, event):
         if self.dragging_roi:
+            # Notify ROI that drag ended (for LaneROI marker callbacks)
+            if hasattr(self.dragging_roi, 'end_marker_drag'):
+                self.dragging_roi.end_marker_drag()
             self.dragging_roi = None
             self.drag_handle = None
             self.last_pos = None

@@ -7,8 +7,9 @@ from qtpy.QtWidgets import (
 )
 from qtpy.QtCore import Qt
 from .manager import manager
-from .rois import CoordinateROI, RectangleROI, CircleROI, LineROI
+from .rois import CoordinateROI, RectangleROI, CircleROI, LineROI, LaneROI
 from .analysis import plot_profile, crop_image, measure_intensity, align_lanes
+from .gel_analyzer import show_gel_analyzer
 
 
 class ROIManager(QWidget):
@@ -89,6 +90,12 @@ class ROIManager(QWidget):
         action_measure = QAction("Measure Intensity", self)
         action_measure.triggered.connect(lambda: self.run_analysis(measure_intensity))
         analysis_menu.addAction(action_measure)
+
+        analysis_menu.addSeparator()
+
+        action_gel = QAction("Gel Analyzer...", self)
+        action_gel.triggered.connect(lambda: show_gel_analyzer(self))
+        analysis_menu.addAction(action_gel)
 
         # Lanes Menu
         lanes_menu = self.menu_bar.addMenu("Lanes")
@@ -416,6 +423,8 @@ class ROIManager(QWidget):
                 roi = CircleROI(self.active_window.view, name=item["name"])
             elif cls_name == "LineROI":
                 roi = LineROI(self.active_window.view, name=item["name"])
+            elif cls_name == "LaneROI":
+                roi = LaneROI(self.active_window.view, name=item["name"])
             else:
                 continue
                 
