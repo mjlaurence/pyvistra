@@ -8,18 +8,27 @@ Uses LaneROI to define lanes with integrated peak markers.
 
 import json
 import os
+
 import numpy as np
+from qtpy.QtCore import Qt
+from qtpy.QtWidgets import (
+    QCheckBox,
+    QComboBox,
+    QFileDialog,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSizePolicy,
+    QSpinBox,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
 from scipy.signal import find_peaks
 
-from qtpy.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox,
-    QPushButton, QSpinBox, QTextEdit, QGroupBox, QFileDialog,
-    QSizePolicy, QCheckBox
-)
-from qtpy.QtCore import Qt
-
 from .manager import manager
-from .rois import RectangleROI, LaneROI
+from .rois import LaneROI, RectangleROI
 
 
 def get_builtin_ladders_path():
@@ -73,7 +82,7 @@ class GelAnalyzerWidget(QWidget):
             QComboBox.AdjustToMinimumContentsLengthWithIcon
         )
         for ladder in self.ladders:
-            unit = ladder.get('unit', 'kDa')
+            unit = ladder.get("unit", "kDa")
             display_name = f"{ladder['name']} ({unit})"
             self.ladder_combo.addItem(display_name, userData=ladder)
         ladder_layout.addWidget(self.ladder_combo)
@@ -190,7 +199,7 @@ class GelAnalyzerWidget(QWidget):
 
     def _toggle_labels(self, state):
         """Toggle peak label visibility."""
-        visible = state == Qt.Checked
+        visible = state == Qt.Checked.value
         window = self.roi_manager.active_window
         if window:
             for roi in window.rois:
@@ -200,7 +209,7 @@ class GelAnalyzerWidget(QWidget):
 
     def _toggle_borders(self, state):
         """Toggle lane border visibility."""
-        show_border = state == Qt.Checked
+        show_border = state == Qt.Checked.value
         window = self.roi_manager.active_window
         if window:
             for roi in window.rois:
@@ -241,7 +250,7 @@ class GelAnalyzerWidget(QWidget):
                     ladder["sizes"] = ladder["weights_kda"]
                     ladder["unit"] = "kDa"
                 self.ladders.append(ladder)
-                unit = ladder.get('unit', 'kDa')
+                unit = ladder.get("unit", "kDa")
                 display_name = f"{ladder['name']} ({unit})"
                 self.ladder_combo.addItem(display_name, userData=ladder)
 
@@ -288,7 +297,7 @@ class GelAnalyzerWidget(QWidget):
 
         # Create new LaneROI with same bounds
         lane = LaneROI(window.view, name=roi.name)
-        lane.update(roi.data['p1'], roi.data['p2'])
+        lane.update(roi.data["p1"], roi.data["p2"])
 
         # Replace in window's ROI list
         window.rois[roi_idx] = lane
@@ -304,6 +313,9 @@ class GelAnalyzerWidget(QWidget):
 
     def _detect_peaks(self):
         """Detect peaks in all lanes and update markers."""
+        # Clear previous markers
+        self._clear_markers()
+
         window = self.roi_manager.active_window
         if not window:
             self.results_text.setText("No active window")
@@ -316,11 +328,15 @@ class GelAnalyzerWidget(QWidget):
             return
 
         # Get ladder info
-        ladder_sizes = ladder_data.get('sizes', ladder_data.get('weights_kda', []))
-        unit = ladder_data.get('unit', 'kDa')
+        ladder_sizes = ladder_data.get(
+            "sizes", ladder_data.get("weights_kda", [])
+        )
+
+        unit = ladder_data.get("unit", "kDa")
 
         # Get standard lane index
         self._std_idx = self.lane_combo.currentData()
+
         if self._std_idx is None:
             self.results_text.setText("No standard lane selected")
             return
@@ -341,9 +357,6 @@ class GelAnalyzerWidget(QWidget):
         # Get detection parameters
         prominence = self.prominence_spin.value()
         min_distance = self.distance_spin.value()
-
-        # Clear previous markers
-        self._clear_markers()
 
         # Find and convert Rectangle ROIs to Lane ROIs
         self._lane_rois = []
@@ -370,13 +383,12 @@ class GelAnalyzerWidget(QWidget):
 
             # Find peaks
             peaks, _ = find_peaks(
-                profile,
-                prominence=prominence,
-                distance=min_distance
+                profile, prominence=prominence, distance=min_distance
             )
 
             # Determine color based on whether this is the ladder
-            is_ladder = (roi_idx == self._std_idx)
+            is_ladder = roi_idx == self._std_idx
+
             color = LaneROI.LADDER_COLOR if is_ladder else LaneROI.SAMPLE_COLOR
 
             # Create marker data
@@ -385,11 +397,9 @@ class GelAnalyzerWidget(QWidget):
                 label = ""
                 if is_ladder and i < len(ladder_sizes):
                     label = f"{ladder_sizes[i]} {unit}"
-                marker_data.append({
-                    'y_local': float(peak_y),
-                    'label': label,
-                    'color': color
-                })
+                marker_data.append(
+                    {"y_local": float(peak_y), "label": label, "color": color}
+                )
 
             # Set markers on lane
             lane.set_markers(marker_data)
@@ -414,8 +424,10 @@ class GelAnalyzerWidget(QWidget):
         if not ladder_data:
             return
 
-        ladder_sizes = ladder_data.get('sizes', ladder_data.get('weights_kda', []))
-        unit = ladder_data.get('unit', 'kDa')
+        ladder_sizes = ladder_data.get(
+            "sizes", ladder_data.get("weights_kda", [])
+        )
+        unit = ladder_data.get("unit", "kDa")
 
         self._calculate_and_display(ladder_sizes, unit)
 
@@ -506,6 +518,7 @@ class GelAnalyzerWidget(QWidget):
     def _copy_results(self):
         """Copy results to clipboard."""
         from qtpy.QtWidgets import QApplication
+
         text = self.results_text.toPlainText()
         QApplication.clipboard().setText(text)
 
@@ -517,7 +530,7 @@ class GelAnalyzerWidget(QWidget):
 
         # Get unit from current ladder
         ladder_data = self.ladder_combo.currentData()
-        unit = ladder_data.get('unit', 'kDa') if ladder_data else 'kDa'
+        unit = ladder_data.get("unit", "kDa") if ladder_data else "kDa"
 
         path, _ = QFileDialog.getSaveFileName(
             self, "Export Results", "gel_analysis.csv", "CSV Files (*.csv)"
