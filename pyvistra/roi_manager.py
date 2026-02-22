@@ -1,9 +1,10 @@
 import json
 import os
+import re
 from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QPushButton,
     QLabel, QFileDialog, QListWidgetItem, QComboBox, QMenuBar, QAction,
-    QSizePolicy
+    QSizePolicy, QLineEdit
 )
 from qtpy.QtCore import Qt
 from .manager import manager
@@ -49,7 +50,17 @@ class ROIManager(QWidget):
         self.window_combo.currentIndexChanged.connect(self.on_window_combo_changed)
         win_layout.addWidget(self.window_combo)
         self.layout.addLayout(win_layout)
-        
+
+        # Z Slices Input
+        z_layout = QHBoxLayout()
+        z_layout.addWidget(QLabel("Z slices:"))
+        self.z_slice_input = QLineEdit()
+        self.z_slice_input.setPlaceholderText("eg. 1-20")
+        self.z_slice_input.textChanged.connect(self._on_z_slice_text_changed)
+        self.z_slice_input.editingFinished.connect(self._validate_z_slice)
+        z_layout.addWidget(self.z_slice_input)
+        self.layout.addLayout(z_layout)
+
         # List
         self.roi_list = QListWidget()
         self.roi_list.itemClicked.connect(self.on_item_clicked)
@@ -366,6 +377,42 @@ class ROIManager(QWidget):
             self.roi_list.clearSelection()
         self.roi_list.blockSignals(False)
 
+    def _on_z_slice_text_changed(self, text):
+        """When the user types anything, restore the normal placeholder."""
+        if text:
+            self.z_slice_input.setPlaceholderText("eg. 1-20")
+
+    def _validate_z_slice(self):
+        """Validate on focus-out / Enter. Clear and show 'Invalid Input' if bad."""
+        text = self.z_slice_input.text().strip()
+        if not text:
+            return
+        match = re.match(r'^(\d+)-(\d+)$', text)
+        if match:
+            start, end = int(match.group(1)), int(match.group(2))
+            if start < end:
+                return  # Valid
+        # Invalid: clear the field and hint the user
+        self.z_slice_input.clear()
+        self.z_slice_input.setPlaceholderText("Invalid Input")
+
+    def _get_z_range(self):
+        """Return [zstart, zend] (1-indexed) from the Z slices field.
+
+        Falls back to the full z stack when the field is empty.
+        """
+        text = self.z_slice_input.text().strip()
+        if text:
+            match = re.match(r'^(\d+)-(\d+)$', text)
+            if match:
+                start, end = int(match.group(1)), int(match.group(2))
+                if start < end:
+                    return [start, end]
+        # Default: full z stack (1-indexed)
+        if self.active_window and hasattr(self.active_window, 'Z'):
+            return [1, self.active_window.Z]
+        return [1, 1]
+
     def save_rois(self):
         if not self.active_window:
             return
@@ -387,6 +434,14 @@ class ROIManager(QWidget):
             return
             
         data = [roi.to_dict() for roi in self.active_window.rois]
+
+        # Append z-stack range specification
+        data.append({
+            "type": "zstack_specify",
+            "name": "0",
+            "data": self._get_z_range(),
+        })
+
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
 
@@ -415,7 +470,12 @@ class ROIManager(QWidget):
             
         for item in data:
             cls_name = item["type"]
-            if cls_name == "CoordinateROI":
+            if cls_name == "zstack_specify":
+                z_range = item.get("data")
+                if isinstance(z_range, list) and len(z_range) == 2:
+                    self.z_slice_input.setText(f"{z_range[0]}-{z_range[1]}")
+                continue
+            elif cls_name == "CoordinateROI":
                 roi = CoordinateROI(self.active_window.view, name=item["name"])
             elif cls_name == "RectangleROI":
                 roi = RectangleROI(self.active_window.view, name=item["name"])
