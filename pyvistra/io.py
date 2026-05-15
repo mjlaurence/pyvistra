@@ -452,6 +452,61 @@ def load_image(filepath, use_memmap=True):
 
     ext = os.path.splitext(filepath)[1].lower()
 
+    # --- ND2 PATH ---
+    if ext == ".nd2":
+        import nd2 as nd2lib
+
+        with nd2lib.ND2File(filepath) as f:
+            # Extract channel names from file metadata
+            channels_info = []
+            try:
+                for i, ch in enumerate(f.metadata.channels or []):
+                    name = (
+                        ch.channel.name
+                        if ch.channel and ch.channel.name
+                        else f"Channel {i}"
+                    )
+                    channels_info.append({"id": i, "name": name})
+            except Exception:
+                pass
+
+            # Extract voxel size in microns (z, y, x)
+            try:
+                vs = f.voxel_size()
+                scale = (vs.z, vs.y, vs.x)
+            except Exception:
+                scale = (1.0, 1.0, 1.0)
+
+            # Build dims string, dropping any non-standard axes (e.g. 'P')
+            known_dims = {"t", "z", "c", "y", "x"}
+            all_dim_keys = list(f.sizes.keys())
+            unknown_axes = [
+                i for i, k in enumerate(all_dim_keys) if k.lower() not in known_dims
+            ]
+
+            img = np.asarray(f.asarray())
+
+        # Squeeze out unknown axes (take index 0)
+        for axis in sorted(unknown_axes, reverse=True):
+            img = img.take(0, axis=axis)
+
+        dims_str = "".join(k.lower() for k in all_dim_keys if k.lower() in known_dims)
+        final_img = normalize_to_5d(img, dims=dims_str).array
+
+        n_channels = final_img.shape[2]
+        if len(channels_info) != n_channels:
+            channels_info = [
+                {"id": i, "name": f"Channel {i}"} for i in range(n_channels)
+            ]
+
+        return Numpy5DProxy(final_img), {
+            "filename": os.path.basename(filepath),
+            "shape": final_img.shape,
+            "scale": scale,
+            "channels": channels_info,
+            "is_rgb": False,
+        }
+
     # --- IMARIS PATH ---
     if ext == ".ims":
         reader = ImarisReader(filepath)
