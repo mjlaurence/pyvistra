@@ -26,6 +26,7 @@ dependencies = [
     "matplotlib",
     "zarr>=3.0",
     "scipy",
+    "nd2",
 ]
 
 [project.scripts]

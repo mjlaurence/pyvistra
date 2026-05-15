@@ -764,7 +764,7 @@ class Toolbar(QMainWindow):
         files = [u.toLocalFile() for u in event.mimeData().urls()]
 
         # Collect supported image files
-        supported_ext = {".ims", ".tif", ".tiff", ".png", ".jpg", ".jpeg"}
+        supported_ext = {".ims", ".tif", ".tiff", ".nd2", ".png", ".jpg", ".jpeg"}
         image_files = []
 
         for f in files:
@@ -792,7 +792,14 @@ class Toolbar(QMainWindow):
             self.spawn_viewer(image_files[0])
 
     def open_file_dialog(self):
-        fname, _ = QFileDialog.getOpenFileName(self, "Open file", ".")
+        file_filter = (
+            "Image Files (*.ims *.tif *.tiff *.nd2 *.png *.jpg *.jpeg);;"
+            "Nikon ND2 (*.nd2);;"
+            "Imaris (*.ims);;"
+            "TIFF (*.tif *.tiff);;"
+            "All Files (*)"
+        )
+        fname, _ = QFileDialog.getOpenFileName(self, "Open file", ".", file_filter)
         if fname:
             self.spawn_viewer(fname)
 
