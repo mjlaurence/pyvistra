@@ -8,7 +8,15 @@ from qtpy.QtWidgets import (
 )
 from qtpy.QtCore import Qt
 from .manager import manager
-from .rois import CoordinateROI, RectangleROI, CircleROI, LineROI, LaneROI, FreehandROI
+from .rois import (
+    CoordinateROI,
+    RectangleROI,
+    CircleROI,
+    LineROI,
+    LaneROI,
+    FreehandROI,
+    PaintbrushROI,
+)
 from .analysis import plot_profile, crop_image, measure_intensity, align_lanes
 from .gel_analyzer import show_gel_analyzer
 
@@ -61,6 +69,16 @@ class ROIManager(QWidget):
         z_layout.addWidget(self.z_slice_input)
         self.layout.addLayout(z_layout)
 
+        # Paintbrush Radius Input
+        radius_layout = QHBoxLayout()
+        radius_layout.addWidget(QLabel("Brush radius:"))
+        self.radius_input = QLineEdit()
+        self.radius_input.setPlaceholderText("eg. 5")
+        self.radius_input.textChanged.connect(self._on_radius_text_changed)
+        self.radius_input.editingFinished.connect(self._validate_radius)
+        radius_layout.addWidget(self.radius_input)
+        self.layout.addLayout(radius_layout)
+
         # List
         self.roi_list = QListWidget()
         self.roi_list.itemClicked.connect(self.on_item_clicked)
@@ -72,7 +90,11 @@ class ROIManager(QWidget):
         self.btn_delete = QPushButton("Delete")
         self.btn_delete.clicked.connect(self.delete_roi)
         btn_layout.addWidget(self.btn_delete)
-        
+
+        self.btn_fill = QPushButton("Fill")
+        self.btn_fill.clicked.connect(self.fill_selected_roi)
+        btn_layout.addWidget(self.btn_fill)
+
         self.btn_save = QPushButton("Save")
         self.btn_save.clicked.connect(self.save_rois)
         btn_layout.addWidget(self.btn_save)
@@ -353,6 +375,28 @@ class ROIManager(QWidget):
         self.refresh_list()
         self.active_window.canvas.update()
 
+    def fill_selected_roi(self):
+        """Flood-fill the area enclosed by the selected PaintbrushROI."""
+        if not self.active_window:
+            return
+
+        item = self.roi_list.currentItem()
+        roi = item.data(Qt.UserRole) if item else None
+
+        if not isinstance(roi, PaintbrushROI):
+            # Nothing selected in the list - fall back to whichever
+            # paintbrush/eraser layer is currently selected on the canvas,
+            # so Fill works right after drawing without an extra
+            # selection step in this list.
+            roi = self.active_window.find_selected_roi(PaintbrushROI)
+
+        if not isinstance(roi, PaintbrushROI):
+            return
+
+        roi.fill()
+        self.select_roi(roi)
+        self.active_window.canvas.update()
+
     def on_item_clicked(self, item):
         if not self.active_window:
             return
@@ -395,6 +439,23 @@ class ROIManager(QWidget):
         # Invalid: clear the field and hint the user
         self.z_slice_input.clear()
         self.z_slice_input.setPlaceholderText("Invalid Input")
+
+    def _on_radius_text_changed(self, text):
+        """When the user types anything, restore the normal placeholder."""
+        if text:
+            self.radius_input.setPlaceholderText("eg. 5")
+
+    def _validate_radius(self):
+        """Validate on focus-out / Enter. Clear and show 'Invalid Input' if bad."""
+        text = self.radius_input.text().strip()
+        if not text:
+            return
+        if text.isdigit() and int(text) > 0:
+            manager.paintbrush_radius = int(text)
+            return  # Valid
+        # Invalid: clear the field and hint the user
+        self.radius_input.clear()
+        self.radius_input.setPlaceholderText("Invalid Input")
 
     def _get_z_range(self):
         """Return [zstart, zend] (1-indexed) from the Z slices field.
@@ -487,6 +548,8 @@ class ROIManager(QWidget):
                 roi = LaneROI(self.active_window.view, name=item["name"])
             elif cls_name == "FreehandROI":
                 roi = FreehandROI(self.active_window.view, name=item["name"])
+            elif cls_name == "PaintbrushROI":
+                roi = PaintbrushROI(self.active_window.view, name=item["name"])
             else:
                 continue
                 

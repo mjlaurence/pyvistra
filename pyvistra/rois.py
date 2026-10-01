@@ -1,5 +1,27 @@
 import numpy as np
 from vispy import scene
+from vispy.color import Colormap
+
+
+def _encode_mask_rle(mask):
+    """Row-major run-length encoding of a boolean mask: [[start, length], ...]."""
+    flat = mask.reshape(-1)
+    if flat.size == 0:
+        return []
+    changes = np.flatnonzero(np.diff(flat)) + 1
+    starts = np.concatenate(([0], changes))
+    ends = np.concatenate((changes, [flat.size]))
+    return [
+        [int(s), int(e - s)] for s, e in zip(starts, ends) if flat[s]
+    ]
+
+
+def _decode_mask_rle(runs, shape):
+    """Inverse of _encode_mask_rle."""
+    flat = np.zeros(shape[0] * shape[1], dtype=bool)
+    for start, length in runs:
+        flat[start:start + length] = True
+    return flat.reshape(shape)
 
 
 class ROI:
@@ -1170,3 +1192,309 @@ class FreehandROI(ROI):
         """Rebuild visuals from serialized data."""
         if "points" in self.data:
             self.update(self.data["points"])
+
+
+class PaintbrushROI(ROI):
+    """
+    Paintbrush/eraser ROI: a persistent raster mask, painted or erased
+    with a circular brush - closer to a Napari Labels layer than a vector
+    shape. This is what makes re-selecting the layer and continuing to
+    paint/erase/fill on it natural: there's no separate "stroke history"
+    to reconnect, painting just keeps modifying the same mask.
+
+    While a stroke is being drawn (mouse held down), it's shown as a live
+    preview of filled circular stamps (vispy Markers - no line/joint
+    geometry to misrender on sharp turns, unlike a tessellated line).
+    On release (end_stroke), that stamped region is merged into the
+    persistent mask - unioned in for painting, subtracted for erasing -
+    and the mask's own translucent overlay is refreshed once. Merging
+    only once per stroke (not per point) keeps drawing responsive: a
+    full-mask visual refresh costs a few ms regardless of image size, so
+    doing it every point would make long strokes stutter, but each
+    stamp into the persistent mask only touches a small local region and
+    stays cheap regardless of stroke length.
+
+    Call fill() to flood-fill the area(s) enclosed by the mask (or the
+    image border) directly into that same persistent mask.
+    """
+
+    _PAINT_COLOR = (1.0, 0.55, 0.0, 1.0)  # orange - live paint preview
+    _ERASE_COLOR = (0.9, 0.15, 0.15, 1.0)  # red - live erase preview
+    _MASK_COLOR = (1.0, 0.55, 0.0, 0.45)  # translucent orange - persistent mask
+
+    # Max points held by any one physical Markers visual. A stroke longer
+    # than this is split across multiple visuals, so re-uploading the
+    # active chunk while drawing stays cheap instead of growing with the
+    # whole stroke's length.
+    _CHUNK_SIZE = 300
+
+    def __init__(self, view, name="Paintbrush", radius=5, shape=None):
+        super().__init__(view, name)
+        self.radius = radius
+        self.shape = shape  # (Y, X) - set here, or by from_dict() when loading
+        self.mask = np.zeros(shape, dtype=bool) if shape is not None else None
+
+        self._active_stroke = []  # points in the stroke currently being drawn
+        self._active_erase = False
+        self._chunks = []  # live-preview Markers visuals for the active stroke
+
+        # A scalar image + 2-stop colormap (transparent -> translucent
+        # orange) is much cheaper to refresh than manually building a full
+        # RGBA array every time: it's a single dtype cast of the boolean
+        # mask, not a per-pixel fill of 4 channels (measured ~1.5ms vs
+        # ~200ms on a 2000x2000 mask).
+        self.mask_visual = scene.visuals.Image(
+            cmap=Colormap([(0, 0, 0, 0), self._MASK_COLOR]),
+            clim=(0, 1),
+            parent=self.view.scene,
+        )
+        self.mask_visual.set_gl_state(
+            preset="translucent",
+            blend=True,
+            blend_func=("src_alpha", "one_minus_src_alpha"),
+            depth_test=False,
+        )
+        self.mask_visual.visible = False
+        self.visuals.append(self.mask_visual)
+
+    # ---- Live drawing (paint or erase) ----
+
+    def start_new_stroke(self, point, erase=False):
+        """Begin a new stroke - paint or erase - on this same ROI/layer."""
+        if self._active_stroke:
+            self.end_stroke()
+        self._active_erase = erase
+        self.add_point(point)
+
+    def add_point(self, point):
+        """
+        Add a point to the live preview of the stroke currently being
+        drawn. Backfills intermediate stamps when the mouse moved farther
+        than half the brush radius since the last point, so fast movement
+        doesn't leave gaps between stamps.
+        """
+        stroke = self._active_stroke
+        if stroke:
+            last = np.array(stroke[-1])
+            new = np.array(point)
+            dist = np.linalg.norm(new - last)
+            step = max(self.radius / 2, 1)
+            if dist > step:
+                n_steps = min(int(dist // step), 500)
+                for i in range(1, n_steps + 1):
+                    interp = last + (new - last) * (i / (n_steps + 1))
+                    stroke.append(tuple(interp))
+        stroke.append(tuple(point))
+        self._update_active_chunk()
+
+    def end_stroke(self):
+        """Merge the active stroke's stamps into the persistent mask."""
+        pts = self._active_stroke
+        if pts:
+            stroke_mask = np.zeros(self.shape, dtype=bool)
+            self._stamp_points(stroke_mask, pts)
+
+            if self._active_erase:
+                self.mask &= ~stroke_mask
+            else:
+                self.mask |= stroke_mask
+
+        self._clear_active_chunks()
+        self._active_stroke = []
+        self._update_label_position()
+        self._update_mask_visual()
+
+    def _add_chunk_visual(self):
+        markers = scene.visuals.Markers(
+            parent=self.view.scene,
+            scaling="scene",  # stamp size follows data/image pixels, not screen px
+            method="points",
+        )
+        color = self._ERASE_COLOR if self._active_erase else self._PAINT_COLOR
+        markers.set_data(pos=np.zeros((0, 2)), size=self.radius * 2, face_color=color, edge_width=0)
+        self._chunks.append(markers)
+        self.visuals.append(markers)
+
+    def _update_active_chunk(self):
+        """
+        Cheap incremental update used while actively drawing: only the
+        current (last) chunk is touched, so cost stays bounded by
+        _CHUNK_SIZE regardless of how long the stroke has grown.
+        """
+        pts = self._active_stroke
+        n_chunks_needed = -(-len(pts) // self._CHUNK_SIZE) or 1
+        while len(self._chunks) < n_chunks_needed:
+            self._add_chunk_visual()
+
+        last_idx = len(self._chunks) - 1
+        start = last_idx * self._CHUNK_SIZE
+        end = min(start + self._CHUNK_SIZE - 1, len(pts) - 1)
+        color = self._ERASE_COLOR if self._active_erase else self._PAINT_COLOR
+        pos = np.array(pts[start:end + 1], dtype=np.float32)
+        self._chunks[last_idx].set_data(pos=pos, size=self.radius * 2, face_color=color, edge_width=0)
+
+    def _clear_active_chunks(self):
+        for markers in self._chunks:
+            markers.parent = None
+            if markers in self.visuals:
+                self.visuals.remove(markers)
+        self._chunks = []
+
+    def _update_label_position(self):
+        if self._active_stroke:
+            mx, my = self._active_stroke[-1]
+            self.label_visual.pos = (mx, my - 5, 0)
+
+    def _update_handles(self):
+        # No handles: this ROI is a raster mask, not a set of draggable
+        # points. The whole ROI can still be dragged via hit_test's
+        # "center" result.
+        pass
+
+    def hit_test(self, point):
+        """Hit if the point falls inside the painted/filled mask."""
+        hid = ROI.hit_test(self, point)
+        if hid is not None:
+            return hid
+
+        if self.mask is not None:
+            ix, iy = int(round(point[0])), int(round(point[1]))
+            Y, X = self.mask.shape
+            if 0 <= iy < Y and 0 <= ix < X and self.mask[iy, ix]:
+                return "center"
+
+        return None
+
+    def move(self, delta):
+        """Shift the whole mask by delta (dx, dy)."""
+        from scipy.ndimage import shift
+
+        dx, dy = delta
+        self.mask = shift(
+            self.mask, (dy, dx), order=0, mode="constant", cval=False
+        ).astype(bool)
+        self._update_mask_visual()
+
+    def adjust(self, handle_id, new_pos):
+        """No-op: a raster mask has no individual points to adjust."""
+        pass
+
+    def set_radius(self, radius):
+        """
+        Update the brush radius for future strokes.
+
+        Past strokes already merged into the mask keep their painted
+        shape - like a real paint tool, changing brush size doesn't
+        retroactively resize what you already painted.
+        """
+        self.radius = radius
+
+    def _stamp_points(self, mask, points):
+        """
+        Mark every pixel within `radius` of ANY of the given points.
+
+        A long stroke can have thousands of points (add_point backfills
+        densely to avoid gaps), so this is done as one vectorized bounded
+        distance transform rather than looping per-point/segment in
+        Python - the loop's per-call overhead doesn't scale, while this
+        stays fast regardless of point count. Points are spaced at most
+        radius/2 apart (see add_point), so distance-to-nearest-point is
+        an exact stand-in for distance-to-the-path.
+        """
+        from scipy.ndimage import distance_transform_edt
+
+        pts = np.asarray(points, dtype=float)
+        r = self.radius
+        Y, X = mask.shape
+
+        xmin = max(int(np.floor(pts[:, 0].min() - r)), 0)
+        xmax = min(int(np.ceil(pts[:, 0].max() + r)) + 1, X)
+        ymin = max(int(np.floor(pts[:, 1].min() - r)), 0)
+        ymax = min(int(np.ceil(pts[:, 1].max() + r)) + 1, Y)
+        if xmax <= xmin or ymax <= ymin:
+            return
+
+        h, w = ymax - ymin, xmax - xmin
+        seeds = np.ones((h, w), dtype=bool)
+        ix = np.clip(np.round(pts[:, 0]).astype(int) - xmin, 0, w - 1)
+        iy = np.clip(np.round(pts[:, 1]).astype(int) - ymin, 0, h - 1)
+        seeds[iy, ix] = False
+
+        dist = distance_transform_edt(seeds)
+        mask[ymin:ymax, xmin:xmax] |= dist <= r
+
+    def fill(self):
+        """
+        Fill the area(s) enclosed by the current mask, directly into
+        that same persistent mask.
+
+        Any region fully enclosed by the mask - not touching the image
+        border at all - is filled; this supports several independent
+        closed shapes. A mask that instead divides the image by reaching
+        the border on both ends (e.g. a line traced across the whole
+        image) has no such true enclosure, since both halves it creates
+        touch the border independently; there's no way to infer which
+        side is wanted without extra input, so the smaller of the two is
+        filled.
+
+        Returns:
+            The filled boolean (Y, X) mask.
+        """
+        from scipy.ndimage import label
+
+        background = ~self.mask
+        labels, num_features = label(background)
+
+        fill_mask = np.zeros(self.shape, dtype=bool)
+        border_regions = []  # (label, pixel count) for regions touching the edge
+        for lbl in range(1, num_features + 1):
+            region = labels == lbl
+            touches_border = (
+                region[0, :].any() or region[-1, :].any()
+                or region[:, 0].any() or region[:, -1].any()
+            )
+            if touches_border:
+                border_regions.append((lbl, region.sum()))
+            else:
+                fill_mask |= region  # fully enclosed hole - always fill
+
+        if len(border_regions) >= 2:
+            smallest_label = min(border_regions, key=lambda lc: lc[1])[0]
+            fill_mask |= labels == smallest_label
+
+        self.mask |= fill_mask
+        self._update_mask_visual()
+        return self.mask
+
+    def _update_mask_visual(self):
+        if self.mask is None or not self.mask.any():
+            self.mask_visual.visible = False
+            return
+        self.mask_visual.set_data(self.mask.astype(np.float32))
+        self.mask_visual.visible = True
+
+    def set_visible(self, visible):
+        super().set_visible(visible)
+        self.mask_visual.visible = visible and self.mask is not None and self.mask.any()
+
+    def to_dict(self):
+        d = {
+            "type": self.__class__.__name__,
+            "name": self.name,
+            "data": {"radius": self.radius},
+        }
+        if self.mask is not None:
+            d["data"]["mask_shape"] = list(self.mask.shape)
+            d["data"]["mask_rle"] = _encode_mask_rle(self.mask)
+        return d
+
+    def from_dict(self, data):
+        self.data = data
+        self.radius = data.get("radius", self.radius)
+
+        mask_shape = data.get("mask_shape")
+        mask_rle = data.get("mask_rle")
+        if mask_shape and mask_rle is not None:
+            self.shape = tuple(mask_shape)
+            self.mask = _decode_mask_rle(mask_rle, self.shape)
+        self._update_mask_visual()
