@@ -1150,17 +1150,20 @@ class DownsampleDialog(QDialog):
     factor. After exec_(), `factor` is the chosen factor (1 = full res).
     """
 
-    def __init__(self, width, height, parent=None):
+    def __init__(self, shape, dtype, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Large Image")
+        T, Z, C, height, width = shape
         self.width_px = width
         self.height_px = height
+        self.bytes_per_px = T * Z * C * np.dtype(dtype).itemsize
         self.factor = 1
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
             f"This image is large ({width} x {height} px) and may be slow "
             "to view.\nDisplay a downsampled version (X and Y only) instead?\n"
+            "The downsampled copy is held in memory for fast browsing.\n"
             "ROIs saved from it are stored at full resolution."
         ))
 
@@ -1192,7 +1195,8 @@ class DownsampleDialog(QDialog):
     def _update_size_label(self, f):
         w = len(range(f // 2, self.width_px, f))
         h = len(range(f // 2, self.height_px, f))
-        self.size_label.setText(f"→ {w} x {h} px")
+        gb = w * h * self.bytes_per_px / 1e9
+        self.size_label.setText(f"→ {w} x {h} px ({gb:.2f} GB in memory)")
 
     def accept(self):
         self.factor = self.spin.value()

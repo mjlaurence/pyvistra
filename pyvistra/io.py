@@ -232,55 +232,40 @@ class Numpy5DProxy:
         return self.array[key]
 
 
-class Downsampled5DProxy:
+def load_downsampled(source, factor, progress_cb=None):
     """
-    Wraps any 5D proxy to view it downsampled in Y and X (not T, Z or C)
-    by an integer factor, for fast display of very large images.
+    Read a 5D proxy into memory downsampled in Y and X (not T, Z or C) by
+    an integer factor, for fast viewing of very large images.
 
     Every `factor`-th pixel is taken, starting from the middle of each
     factor x factor block, so displayed pixel i sits at the centre of
     full-resolution pixels [i * factor, (i + 1) * factor). Coordinates
     therefore convert between the two simply by multiplying/dividing by
     `factor`.
+
+    Data is read one (T, Z) plane at a time, so peak memory is the
+    downsampled result plus one full-resolution plane.
+
+    Args:
+        source: 5D proxy (T, Z, C, Y, X)
+        factor: Integer downsampling factor for Y and X
+        progress_cb: Optional callback(progress_fraction)
+
+    Returns:
+        Numpy5DProxy holding the downsampled data
     """
-
-    def __init__(self, source, factor):
-        self.source = source
-        self.factor = factor
-        self.offset = factor // 2
-        T, Z, C, Y, X = source.shape
-        self.shape = (
-            T, Z, C,
-            len(range(self.offset, Y, factor)),
-            len(range(self.offset, X, factor)),
-        )
-        self.dtype = source.dtype
-        self.ndim = 5
-
-    def close(self):
-        if hasattr(self.source, "close"):
-            self.source.close()
-
-    def __getitem__(self, key):
-        if not isinstance(key, tuple):
-            key = (key,)
-
-        # Expand Ellipsis to fill missing dimensions
-        if Ellipsis in key:
-            ellipsis_idx = key.index(Ellipsis)
-            n_expand = 5 - (len(key) - 1)
-            key = (
-                key[:ellipsis_idx]
-                + (slice(None),) * n_expand
-                + key[ellipsis_idx + 1 :]
-            )
-
-        if len(key) < 5:
-            key = key + (slice(None),) * (5 - len(key))
-
-        t_idx, z_idx, c_idx, y_idx, x_idx = key
-        stride = slice(self.offset, None, self.factor)
-        return self.source[t_idx, z_idx, c_idx, stride, stride][..., y_idx, x_idx]
+    T, Z, C, Y, X = source.shape
+    offset = factor // 2
+    out = np.empty(
+        (T, Z, C, len(range(offset, Y, factor)), len(range(offset, X, factor))),
+        dtype=source.dtype,
+    )
+    for t in range(T):
+        for z in range(Z):
+            out[t, z] = source[t, z][..., offset::factor, offset::factor]
+            if progress_cb:
+                progress_cb((t * Z + z + 1) / (T * Z))
+    return Numpy5DProxy(out)
 
 
 class ImageBuffer:

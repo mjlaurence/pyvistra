@@ -16,6 +16,7 @@ from qtpy.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QProgressDialog,
     QSlider,
     QToolBar,
     QVBoxLayout,
@@ -26,9 +27,9 @@ from vispy import app, scene
 
 from .console import console_exists, get_console
 from .io import (
-    Downsampled5DProxy,
     Imaris5DProxy,
     Numpy5DProxy,
+    load_downsampled,
     load_image,
     normalize_to_5d,
 )
@@ -114,12 +115,29 @@ class ImageWindow(QMainWindow):
             downsample = 1
             full_y, full_x = self.full_shape
             if full_y * full_x > LARGE_IMAGE_PIXELS:
-                dlg = DownsampleDialog(full_x, full_y)
+                dlg = DownsampleDialog(self.img_data.shape, self.img_data.dtype)
                 dlg.exec_()
                 downsample = dlg.factor
         self.downsample = downsample
         if downsample > 1:
-            self.img_data = Downsampled5DProxy(self.img_data, downsample)
+            # Hold the (small) downsampled copy in RAM so moving between
+            # slices never goes back to the file.
+            progress = QProgressDialog(
+                "Loading downsampled image...", None, 0, 100
+            )
+            progress.setWindowTitle("Loading")
+            progress.setWindowModality(Qt.ApplicationModal)
+            progress.setMinimumDuration(500)
+            source = self.img_data
+            self.img_data = load_downsampled(
+                source,
+                downsample,
+                progress_cb=lambda frac: progress.setValue(int(frac * 100)),
+            )
+            progress.close()
+            # Release the full-resolution file if this window opened it
+            if self.filepath and hasattr(source, "close"):
+                source.close()
             sz, sy, sx = self.meta.get("scale", (1.0, 1.0, 1.0))
             self.meta = {
                 **self.meta,

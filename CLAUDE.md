@@ -37,7 +37,7 @@ Proxies behave like numpy arrays but load data on-demand:
 - `Imaris5DProxy` - HDF5-based .ims files
 - `Numpy5DProxy` - In-memory arrays
 - `TransposedProxy` - On-the-fly reorientation
-- `Downsampled5DProxy` - X/Y-downsampled view of a large image (offered by `ImageWindow` on load; ROI save/load converts to/from full-resolution coordinates)
+- `load_downsampled()` - in-memory X/Y-downsampled copy of a large image (offered by `ImageWindow` on load; ROI save/load converts to/from full-resolution coordinates)
 
 ```python
 data, meta = load_image("large_file.ims")  # data is a proxy

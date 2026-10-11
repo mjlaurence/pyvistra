@@ -44,7 +44,7 @@ def _scale_roi_geometry(data, s):
 def roi_dict_to_full_res(d, factor, full_shape):
     """
     Convert a serialized ROI (see ROI.to_dict) drawn on an image viewed
-    downsampled by `factor` (see Downsampled5DProxy) to the full-resolution
+    downsampled by `factor` (see load_downsampled) to the full-resolution
     image's pixel coordinates. `full_shape` is the full image's (Y, X).
     """
     data = _scale_roi_geometry(d["data"], factor)
