@@ -24,6 +24,51 @@ def _decode_mask_rle(runs, shape):
     return flat.reshape(shape)
 
 
+def _scale_roi_geometry(data, s):
+    """Copy of a serialized ROI's data with all its geometry scaled by s."""
+    data = dict(data)
+    for key in ("origin", "anterior", "dorsal", "p1", "p2", "center", "edge"):
+        if key in data:
+            data[key] = [v * s for v in data[key]]
+    if "points" in data:
+        data["points"] = [[x * s, y * s] for x, y in data["points"]]
+    if "markers" in data:
+        data["markers"] = [
+            {**m, "y_local": m["y_local"] * s} for m in data["markers"]
+        ]
+    if "radius" in data:
+        data["radius"] = data["radius"] * s
+    return data
+
+
+def roi_dict_to_full_res(d, factor, full_shape):
+    """
+    Convert a serialized ROI (see ROI.to_dict) drawn on an image viewed
+    downsampled by `factor` (see Downsampled5DProxy) to the full-resolution
+    image's pixel coordinates. `full_shape` is the full image's (Y, X).
+    """
+    data = _scale_roi_geometry(d["data"], factor)
+    if "mask_rle" in data:
+        mask = _decode_mask_rle(data["mask_rle"], data["mask_shape"])
+        rows = np.minimum(np.arange(full_shape[0]) // factor, mask.shape[0] - 1)
+        cols = np.minimum(np.arange(full_shape[1]) // factor, mask.shape[1] - 1)
+        mask = mask[np.ix_(rows, cols)]
+        data["mask_shape"] = list(mask.shape)
+        data["mask_rle"] = _encode_mask_rle(mask)
+    return {**d, "data": data}
+
+
+def roi_dict_from_full_res(d, factor):
+    """Inverse of roi_dict_to_full_res."""
+    data = _scale_roi_geometry(d["data"], 1 / factor)
+    if "mask_rle" in data:
+        mask = _decode_mask_rle(data["mask_rle"], data["mask_shape"])
+        mask = mask[factor // 2::factor, factor // 2::factor]
+        data["mask_shape"] = list(mask.shape)
+        data["mask_rle"] = _encode_mask_rle(mask)
+    return {**d, "data": data}
+
+
 class ROI:
     # Class-level flag to control label visibility for all ROIs
     show_labels = True

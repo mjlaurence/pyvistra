@@ -11,6 +11,7 @@ from qtpy.QtWidgets import (
     QLabel,
     QPushButton,
     QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -1141,6 +1142,61 @@ class MetadataDialog(QDialog):
             v_item = QTableWidgetItem(v_str)
             v_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             self.table.setItem(row, 1, v_item)
+
+
+class DownsampleDialog(QDialog):
+    """
+    Asks whether to display a large image downsampled in X/Y, and by what
+    factor. After exec_(), `factor` is the chosen factor (1 = full res).
+    """
+
+    def __init__(self, width, height, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Large Image")
+        self.width_px = width
+        self.height_px = height
+        self.factor = 1
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            f"This image is large ({width} x {height} px) and may be slow "
+            "to view.\nDisplay a downsampled version (X and Y only) instead?\n"
+            "ROIs saved from it are stored at full resolution."
+        ))
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Downsample factor:"))
+        self.spin = QSpinBox()
+        self.spin.setRange(2, 64)
+        # Default: bring the longest side down to ~2048 px
+        self.spin.setValue(min(max(2, -(-max(width, height) // 2048)), 64))
+        self.spin.valueChanged.connect(self._update_size_label)
+        row.addWidget(self.spin)
+        self.size_label = QLabel()
+        row.addWidget(self.size_label)
+        row.addStretch()
+        layout.addLayout(row)
+        self._update_size_label(self.spin.value())
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        full_btn = QPushButton("Full Resolution")
+        full_btn.clicked.connect(self.reject)
+        buttons.addWidget(full_btn)
+        ds_btn = QPushButton("Downsample")
+        ds_btn.setDefault(True)
+        ds_btn.clicked.connect(self.accept)
+        buttons.addWidget(ds_btn)
+        layout.addLayout(buttons)
+
+    def _update_size_label(self, f):
+        w = len(range(f // 2, self.width_px, f))
+        h = len(range(f // 2, self.height_px, f))
+        self.size_label.setText(f"→ {w} x {h} px")
+
+    def accept(self):
+        self.factor = self.spin.value()
+        super().accept()
 
 
 class TransformDialog(QDialog):

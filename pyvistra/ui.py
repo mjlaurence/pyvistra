@@ -25,7 +25,13 @@ from superqt import QRangeSlider
 from vispy import app, scene
 
 from .console import console_exists, get_console
-from .io import Imaris5DProxy, Numpy5DProxy, load_image, normalize_to_5d
+from .io import (
+    Downsampled5DProxy,
+    Imaris5DProxy,
+    Numpy5DProxy,
+    load_image,
+    normalize_to_5d,
+)
 from .manager import manager
 from .ortho import OrthoViewer
 from .roi_manager import get_roi_manager, roi_manager_exists
@@ -42,6 +48,7 @@ from .widgets import (
     AlignmentDialog,
     ChannelPanel,
     ContrastDialog,
+    DownsampleDialog,
     MetadataDialog,
     TransformDialog,
 )
@@ -50,6 +57,10 @@ try:
     app.use_app(API_NAME)
 except Exception:
     app.use_app("pyqt5")
+
+# Images with more pixels than this per (Y, X) plane prompt to be viewed
+# downsampled instead.
+LARGE_IMAGE_PIXELS = 4096 * 4096
 
 
 class ImageWindow(QMainWindow):
@@ -63,7 +74,7 @@ class ImageWindow(QMainWindow):
     roi_removed = Signal(object)  # Emits the ROI that was removed
     roi_selection_changed = Signal(object)  # Emits the selected ROI (or None)
 
-    def __init__(self, data_or_path, title="Image", meta=None):
+    def __init__(self, data_or_path, title="Image", meta=None, downsample=None):
         super().__init__()
         self.setAttribute(Qt.WA_DeleteOnClose)
 
@@ -95,6 +106,28 @@ class ImageWindow(QMainWindow):
 
             filename = self.meta.get("filename", title)
 
+        # Optionally view large images downsampled in X/Y. Displayed pixel
+        # coordinates are then 1/downsample of the full image's; ROI
+        # save/load converts between the two.
+        self.full_shape = self.img_data.shape[3:]  # (Y, X) at full resolution
+        if downsample is None:
+            downsample = 1
+            full_y, full_x = self.full_shape
+            if full_y * full_x > LARGE_IMAGE_PIXELS:
+                dlg = DownsampleDialog(full_x, full_y)
+                dlg.exec_()
+                downsample = dlg.factor
+        self.downsample = downsample
+        if downsample > 1:
+            self.img_data = Downsampled5DProxy(self.img_data, downsample)
+            sz, sy, sx = self.meta.get("scale", (1.0, 1.0, 1.0))
+            self.meta = {
+                **self.meta,
+                "shape": self.img_data.shape,
+                "scale": (sz, sy * downsample, sx * downsample),
+                "downsample": downsample,
+            }
+
         # Register with Manager
         self.window_id = manager.register(self)
 
@@ -104,6 +137,8 @@ class ImageWindow(QMainWindow):
         sz, sy, sx = self.meta.get("scale", (1.0, 1.0, 1.0))
         title_str = f"[{self.window_id}] {filename} "
         title_str += f"[{self.X}x{self.Y} px] "
+        if self.downsample > 1:
+            title_str += f"[1/{self.downsample} downsampled] "
         if self.filepath:
             title_str += f"[{sx:.2f} x {sy:.2f} \u00b5m]"
         self.setWindowTitle(title_str)

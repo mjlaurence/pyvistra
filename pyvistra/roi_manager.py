@@ -16,6 +16,8 @@ from .rois import (
     LaneROI,
     FreehandROI,
     PaintbrushROI,
+    roi_dict_from_full_res,
+    roi_dict_to_full_res,
 )
 from .analysis import plot_profile, crop_image, measure_intensity, align_lanes
 from .gel_analyzer import show_gel_analyzer
@@ -496,6 +498,13 @@ class ROIManager(QWidget):
             
         data = [roi.to_dict() for roi in self.active_window.rois]
 
+        # Always save in full-resolution pixel coordinates, so ROIs drawn
+        # on a downsampled view line up when loaded on the full image.
+        factor = self.active_window.downsample
+        if factor > 1:
+            full_shape = self.active_window.full_shape
+            data = [roi_dict_to_full_res(d, factor, full_shape) for d in data]
+
         # Append z-stack range specification
         data.append({
             "type": "zstack_specify",
@@ -528,7 +537,8 @@ class ROIManager(QWidget):
             
         with open(path, "r") as f:
             data = json.load(f)
-            
+
+        factor = self.active_window.downsample
         for item in data:
             cls_name = item["type"]
             if cls_name == "zstack_specify":
@@ -552,7 +562,9 @@ class ROIManager(QWidget):
                 roi = PaintbrushROI(self.active_window.view, name=item["name"])
             else:
                 continue
-                
+
+            if factor > 1:
+                item = roi_dict_from_full_res(item, factor)
             roi.from_dict(item["data"])
             self.active_window.rois.append(roi)
             self.active_window.roi_added.emit(roi)
