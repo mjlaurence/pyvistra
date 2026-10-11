@@ -244,7 +244,9 @@ def load_downsampled(source, factor, progress_cb=None):
     `factor`.
 
     Data is read one (T, Z) plane at a time, so peak memory is the
-    downsampled result plus one full-resolution plane.
+    downsampled result plus one full-resolution plane. Imaris files are
+    read from their stored lower-resolution levels where possible (see
+    _load_imaris_downsampled).
 
     Args:
         source: 5D proxy (T, Z, C, Y, X)
@@ -254,6 +256,9 @@ def load_downsampled(source, factor, progress_cb=None):
     Returns:
         Numpy5DProxy holding the downsampled data
     """
+    if isinstance(source, Imaris5DProxy):
+        return _load_imaris_downsampled(source.reader, factor, progress_cb)
+
     T, Z, C, Y, X = source.shape
     offset = factor // 2
     out = np.empty(
@@ -265,6 +270,50 @@ def load_downsampled(source, factor, progress_cb=None):
             out[t, z] = source[t, z][..., offset::factor, offset::factor]
             if progress_cb:
                 progress_cb((t * Z + z + 1) / (T * Z))
+    return Numpy5DProxy(out)
+
+
+def _load_imaris_downsampled(reader, factor, progress_cb=None):
+    """
+    load_downsampled for Imaris files. Imaris stores a pyramid of
+    resolution levels, each averaging 2x2 blocks of the previous one, so
+    level pixel i covers full-resolution pixels [i * f, (i + 1) * f) - the
+    same convention load_downsampled uses. Start from the coarsest level
+    that reduces only Y and X (not Z) by a factor dividing `factor`, then
+    stride the rest.
+
+    Reads one compressed chunk's worth of Z planes at a time, so each
+    chunk is decompressed once rather than once per plane.
+    """
+    T, C, Z, Y, X = reader.shape
+    level, level_factor = 0, 1
+    for k in range(1, reader.resolution_levels):
+        lz, ly, lx = reader.level_shape(k)
+        f = round(X / lx)
+        if lz == Z and round(Y / ly) == f and factor % f == 0:
+            level, level_factor = k, f
+
+    stride = factor // level_factor
+    offset = stride // 2
+    _, ly, lx = reader.level_shape(level)
+    out = np.empty(
+        (T, Z, C, len(range(offset, ly, stride)), len(range(offset, lx, stride))),
+        dtype=reader.dtype,
+    )
+
+    depth = reader.chunk_depth(level)
+    z_starts = range(0, Z, depth)
+    n_steps = T * C * len(z_starts)
+    step = 0
+    for t in range(T):
+        for c in range(C):
+            for z0 in z_starts:
+                z1 = min(z0 + depth, Z)
+                slab = reader.read(c=c, t=t, z=slice(z0, z1), res_level=level)
+                out[t, z0:z1, c] = slab[:, offset::stride, offset::stride]
+                step += 1
+                if progress_cb:
+                    progress_cb(step / n_steps)
     return Numpy5DProxy(out)
 
 

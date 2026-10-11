@@ -31,6 +31,7 @@ class ImarisReader:
         self.voxel_size = (1.0, 1.0, 1.0)
         self.timestamps = []
         self.channels_info = []
+        self._level_shapes = {}  # res_level -> (Z, Y, X)
 
         # Run setup
         self._scan_structure()
@@ -280,17 +281,42 @@ class ImarisReader:
 
             self.channels_info.append(info)
 
+    def level_shape(self, res_level):
+        """(Z, Y, X) image size at a resolution level."""
+        if res_level not in self._level_shapes:
+            data = self._dataset(0, 0, res_level)
+            size = tuple(self._get_val(data, f"ImageSize{a}", int) for a in "ZYX")
+            if not all(isinstance(v, int) for v in size):
+                size = data.shape
+            self._level_shapes[res_level] = size
+        return self._level_shapes[res_level]
+
+    def chunk_depth(self, res_level):
+        """Number of Z planes per stored (compressed) chunk at a resolution level."""
+        chunks = self._dataset(0, 0, res_level).chunks
+        return chunks[0] if chunks else 1
+
     def read(self, c=0, t=0, z=None, res_level=0):
         """
         Reads image data.
         Args:
             c, t: Channel and Timepoint indices.
-            z: Z-slice index. None for full volume.
+            z: Z-slice index or slice. None for full volume.
             res_level: Resolution level (0=Full).
         """
         if res_level >= self.resolution_levels:
             raise ValueError(f"Resolution level {res_level} unavailable.")
 
+        dataset = self._dataset(c, t, res_level)
+
+        # Stored datasets can be padded beyond the image size - crop to it
+        sz, sy, sx = self.level_shape(res_level)
+        if z is None:
+            z = slice(0, sz)
+        return dataset[z, :sy, :sx]
+
+    def _dataset(self, c, t, res_level):
+        """The HDF5 dataset holding channel c, timepoint t at a resolution level."""
         try:
             res_grp_name = self._res_groups[res_level]
             res_grp = self._file["DataSet"][res_grp_name]
@@ -316,10 +342,7 @@ class ImarisReader:
         except Exception as e:
             raise ValueError(f"Error locating data: {str(e)}")
 
-        if z is not None:
-            return dataset[z, :, :]
-        else:
-            return dataset[:]
+        return dataset
 
     def __repr__(self):
         return (

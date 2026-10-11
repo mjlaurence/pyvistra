@@ -58,12 +58,18 @@ def roi_dict_to_full_res(d, factor, full_shape):
     return {**d, "data": data}
 
 
-def roi_dict_from_full_res(d, factor):
-    """Inverse of roi_dict_to_full_res."""
+def roi_dict_from_full_res(d, factor, shape):
+    """
+    Inverse of roi_dict_to_full_res. `shape` is the downsampled image's
+    (Y, X), which a PaintbrushROI's mask is resampled to.
+    """
     data = _scale_roi_geometry(d["data"], 1 / factor)
     if "mask_rle" in data:
         mask = _decode_mask_rle(data["mask_rle"], data["mask_shape"])
-        mask = mask[factor // 2::factor, factor // 2::factor]
+        # Sample the middle of each factor x factor block
+        rows = np.minimum(np.arange(shape[0]) * factor + factor // 2, mask.shape[0] - 1)
+        cols = np.minimum(np.arange(shape[1]) * factor + factor // 2, mask.shape[1] - 1)
+        mask = mask[np.ix_(rows, cols)]
         data["mask_shape"] = list(mask.shape)
         data["mask_rle"] = _encode_mask_rle(mask)
     return {**d, "data": data}

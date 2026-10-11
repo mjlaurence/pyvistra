@@ -1171,8 +1171,12 @@ class DownsampleDialog(QDialog):
         row.addWidget(QLabel("Downsample factor:"))
         self.spin = QSpinBox()
         self.spin.setRange(2, 64)
-        # Default: bring the longest side down to ~2048 px
-        self.spin.setValue(min(max(2, -(-max(width, height) // 2048)), 64))
+        # Default: the power of two bringing the longest side to <= ~2048 px
+        # (powers of two match the resolution levels stored in Imaris files)
+        default = 2
+        while max(width, height) / default > 2048 and default < 64:
+            default *= 2
+        self.spin.setValue(default)
         self.spin.valueChanged.connect(self._update_size_label)
         row.addWidget(self.spin)
         self.size_label = QLabel()

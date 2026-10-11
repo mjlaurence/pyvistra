@@ -564,7 +564,8 @@ class ROIManager(QWidget):
                 continue
 
             if factor > 1:
-                item = roi_dict_from_full_res(item, factor)
+                shape = (self.active_window.Y, self.active_window.X)
+                item = roi_dict_from_full_res(item, factor, shape)
             roi.from_dict(item["data"])
             self.active_window.rois.append(roi)
             self.active_window.roi_added.emit(roi)
